@@ -1,0 +1,6 @@
+Flask
+Flask-CORS
+requests
+langdetect
+python-dotenv
+aixplain
