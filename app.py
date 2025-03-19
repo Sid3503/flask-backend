@@ -1,11 +1,13 @@
 import os
 import requests
 import re
+import ast
 from dotenv import load_dotenv
 
 
 load_dotenv()
 TEAM_API_KEY = os.getenv("TEAM_API_KEY")
+os.environ["TEAM_API_KEY"] = TEAM_API_KEY
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from langdetect import detect
@@ -17,6 +19,7 @@ GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 # Load AI models
 doc_model = ModelFactory.get(os.getenv("DOC_MODEL_ID"))
 summ_model = ModelFactory.get(os.getenv("SUMM_MODEL_ID"))
+news_model = ModelFactory.get(os.getenv("NEWS_MODEL_ID"))
 main_agent = AgentFactory.get(os.getenv("AGENT_MODEL_ID"))
 
 app = Flask(__name__)
@@ -35,6 +38,40 @@ def format_text(text):
     sections = text.split("\n")
     formatted_text = "\n\n".join(section.strip() for section in sections if section.strip())
     return formatted_text
+
+def clean_and_format_response(raw_response):
+    """
+    Cleans and formats the response from the model, separating articles and summary.
+    """
+
+    # Step 1: Extract 'data' field from the response
+    if "data=" in raw_response:
+        raw_response = raw_response.split("data=")[-1].strip()
+
+    # Step 2: Remove unwanted characters like extra parentheses or escape sequences
+    raw_response = raw_response.strip("()'")
+
+    # Step 3: Convert escaped characters (like \n) into actual newlines
+    try:
+        raw_response = ast.literal_eval(f"'''{raw_response}'''")
+    except Exception:
+        pass  # If it fails, keep the string as is
+
+    # Step 4: Find the split point between articles and summary
+    match = re.search(r"https?://\S+\nSource:.*?\nDate: .*?\n\n", raw_response, re.DOTALL)
+
+    if match:
+        articles_part = raw_response[:match.end()].strip()
+        summary_part = raw_response[match.end():].strip()
+    else:
+        return raw_response.strip()  # If no clear separation, return raw text
+
+    # Step 5: Clean extra spaces & format
+    formatted_articles = re.sub(r"\n{3,}", "\n\n", articles_part)
+    formatted_summary = re.sub(r"\n{3,}", "\n\n", summary_part)
+
+    return f"{formatted_articles}\n\n{'-'*100}\n\n{formatted_summary}"
+
 
 def get_nearest_health_centers(latitude, longitude):
     """Fetch nearest public health centers using Google Places API"""
@@ -127,9 +164,11 @@ def find_doctors():
         doctors = doc_model.run({
             "condition": condition,
             "location": location
-        })["data"]
+        })
 
-        return jsonify({"doctors": doctors})
+        doc_response = doctors.data.encode('latin1').decode('utf-8')
+
+        return jsonify({"doctors": doc_response})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -158,6 +197,32 @@ def find_health_centers():
             "nearest_health_centers": health_centers,
             "route": route
         })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route("/news", methods=["POST"])
+def get_news():
+    """Handles fetching news based on selected Indian native language."""
+    try:
+        data = request.json
+        language = data.get("language", "")
+
+        if not language:
+            return jsonify({"error": "Language selection is required"}), 400
+
+        print(f"Received language: {language}")  # 🔹 Debugging: Print the selected language
+
+        # Fetch news in the selected language
+        news = news_model.run({
+            "language": language
+        })
+
+        formatted_news = clean_and_format_response(str(news))
+
+        print(formatted_news)
+
+        return jsonify({"news": formatted_news})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
